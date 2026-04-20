@@ -252,6 +252,8 @@
   .time-main.pulsing { animation: pulse 1s ease-in-out infinite; color: var(--success); }
   .series-box.complete { animation: success-glow 1.5s ease; border-color: var(--success); }
 </style>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
 </head>
 <body>
 <div class="app">
@@ -543,6 +545,13 @@
 
   updateDisplay();
   updateSeriesDisplay();
+</script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(err => console.log('SW error:', err));
+  });
+}
 </script>
 </body>
 </html>
