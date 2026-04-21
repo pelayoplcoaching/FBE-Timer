@@ -1,4 +1,4 @@
-const CACHE = 'fbe-timer-v1';
+const CACHE = 'fbe-timer-v3';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -12,13 +12,14 @@ self.addEventListener('activate', e => {
   );
 });
 
+// Network-first: descarga siempre lo último, cae a caché solo sin conexión.
 self.addEventListener('fetch', e => {
   e.respondWith(
-    caches.match(e.request).then(cached => cached || fetch(e.request).then(res => {
+    fetch(e.request).then(res => {
       if (!res || res.status !== 200 || res.type !== 'basic') return res;
       const resClone = res.clone();
       caches.open(CACHE).then(c => c.put(e.request, resClone));
       return res;
-    }).catch(() => caches.match('./index.html')))
+    }).catch(() => caches.match(e.request).then(cached => cached || caches.match('./index.html')))
   );
 });
