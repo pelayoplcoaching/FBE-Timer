@@ -1,4 +1,4 @@
-const CACHE = 'fbe-timer-v3';
+const CACHE = 'fbe-timer-v4';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -21,5 +21,18 @@ self.addEventListener('fetch', e => {
       caches.open(CACHE).then(c => c.put(e.request, resClone));
       return res;
     }).catch(() => caches.match(e.request).then(cached => cached || caches.match('./index.html')))
+  );
+});
+
+// Click en la notificacion: abrir la PWA
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+      for (const c of list) {
+        if ('focus' in c) return c.focus();
+      }
+      if (clients.openWindow) return clients.openWindow('./');
+    })
   );
 });
