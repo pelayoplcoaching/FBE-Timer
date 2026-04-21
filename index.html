@@ -815,6 +815,93 @@
   });
 
   // ==== GESTION DE NOTIFICACIONES ====
+  // Backend Vercel (sustituir tras deploy) + clave publica VAPID
+  const BACKEND_URL = 'https://fbe-timer-backend.vercel.app';
+  const VAPID_PUBLIC_KEY = 'BFg72UzmAWxcTrqcIuRTAV3T7zBvgVtOgcsP0REA5F65jZ2ZPv0J5WBLdzo8qrY1yUxIL59npF9j_EQUD4gcdQQ';
+  const SUBSCRIPTION_ID_KEY = 'fbe-timer-sub-id';
+
+  function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(base64);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; ++i) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  async function ensurePushSubscription() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+      });
+    }
+    let subscriptionId = localStorage.getItem(SUBSCRIPTION_ID_KEY);
+    if (!subscriptionId) {
+      const resp = await fetch(BACKEND_URL + '/api/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: sub.toJSON() })
+      });
+      if (!resp.ok) throw new Error('subscribe failed: ' + resp.status);
+      const data = await resp.json();
+      subscriptionId = data.subscriptionId;
+      localStorage.setItem(SUBSCRIPTION_ID_KEY, subscriptionId);
+    }
+    return subscriptionId;
+  }
+
+  let currentScheduleToken = 0;
+  let lastScheduledMessageId = null;
+
+  async function schedulePushNotification(delaySeconds, payload) {
+    const subscriptionId = localStorage.getItem(SUBSCRIPTION_ID_KEY);
+    if (!subscriptionId) return null;
+    const token = ++currentScheduleToken;
+    let messageId = null;
+    try {
+      const resp = await fetch(BACKEND_URL + '/api/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscriptionId, delaySeconds, payload })
+      });
+      if (!resp.ok) {
+        if (resp.status === 404) localStorage.removeItem(SUBSCRIPTION_ID_KEY);
+        return null;
+      }
+      const data = await resp.json();
+      messageId = data.messageId;
+    } catch {
+      return null;
+    }
+    // Si se cancelo mientras esperabamos la respuesta, anular ahora
+    if (token !== currentScheduleToken) {
+      cancelScheduledMessage(messageId);
+      return null;
+    }
+    lastScheduledMessageId = messageId;
+    return messageId;
+  }
+
+  function cancelScheduledMessage(messageId) {
+    if (!messageId) return;
+    fetch(BACKEND_URL + '/api/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messageId })
+    }).catch(() => {});
+  }
+
+  function cancelPushNotification() {
+    currentScheduleToken++;
+    const id = lastScheduledMessageId;
+    lastScheduledMessageId = null;
+    cancelScheduledMessage(id);
+  }
+
   function hasNotificationSupport() {
     return 'Notification' in window && 'serviceWorker' in navigator;
   }
@@ -838,30 +925,37 @@
     cancelNotification();
     if (getNotificationStatus() !== 'granted') return;
     if (!endTimeMs) return;
-    const delay = endTimeMs - Date.now();
-    if (delay <= 0) return;
+    const delayMs = endTimeMs - Date.now();
+    if (delayMs <= 0) return;
+
+    const title = 'Descanso terminado';
+    const body = 'Serie ' + currentSeries + '/' + totalSeries + ' lista - A por la siguiente';
+    const payload = {
+      title, body,
+      icon: 'icon-192.png',
+      badge: 'icon-192.png',
+      tag: 'fbe-timer',
+      vibrate: [200, 100, 200, 100, 400]
+    };
+
+    // Con suscripcion push: servidor -> push (funciona con app cerrada o pantalla bloqueada)
+    if (localStorage.getItem(SUBSCRIPTION_ID_KEY)) {
+      schedulePushNotification(Math.ceil(delayMs / 1000), payload);
+      return;
+    }
+
+    // Fallback: setTimeout local (solo con app en primer plano)
     notifTimeout = setTimeout(async () => {
       try {
         const reg = await navigator.serviceWorker.ready;
-        reg.showNotification('Descanso terminado', {
-          body: 'Serie ' + currentSeries + '/' + totalSeries + ' lista - A por la siguiente',
-          icon: 'icon-192.png',
-          badge: 'icon-192.png',
-          tag: 'fbe-timer',
-          renotify: true,
-          requireInteraction: false,
-          vibrate: [200, 100, 200, 100, 400]
+        reg.showNotification(title, {
+          body, icon: payload.icon, badge: payload.badge, tag: payload.tag,
+          renotify: true, requireInteraction: false, vibrate: payload.vibrate
         });
       } catch (e) {
-        // Fallback: notificacion directa sin SW
-        try {
-          new Notification('Descanso terminado', {
-            body: 'Serie ' + currentSeries + '/' + totalSeries + ' lista',
-            icon: 'icon-192.png'
-          });
-        } catch (err) {}
+        try { new Notification(title, { body, icon: payload.icon }); } catch (err) {}
       }
-    }, delay);
+    }, delayMs);
   }
 
   function cancelNotification() {
@@ -869,6 +963,7 @@
       clearTimeout(notifTimeout);
       notifTimeout = null;
     }
+    cancelPushNotification();
   }
 
   // ==== BANNER DE NOTIFICACIONES ====
@@ -892,9 +987,10 @@
     const result = await requestNotificationPermission();
     localStorage.setItem(NOTIF_KEY, result);
     notifBanner.style.display = 'none';
-    // Si ya estabamos corriendo, programar la notificacion ahora
-    if (result === 'granted' && running && endTimeMs) {
-      scheduleNotification();
+    if (result === 'granted') {
+      try { await ensurePushSubscription(); }
+      catch (e) { console.warn('push subscribe failed', e); }
+      if (running && endTimeMs) scheduleNotification();
     }
   });
 
@@ -938,6 +1034,11 @@
 
   // Mostrar banner si procede al cargar
   setTimeout(maybeShowNotifBanner, 500);
+
+  // Si ya tenemos permiso concedido, asegurar suscripcion push en el backend
+  if (hasNotificationSupport() && getNotificationStatus() === 'granted') {
+    ensurePushSubscription().catch(err => console.warn('push subscribe (load) failed', err));
+  }
 
   // Sincronizar botones activos con valores guardados
   timePresets.forEach(b => {
